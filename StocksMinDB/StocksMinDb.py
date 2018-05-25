@@ -14,7 +14,7 @@ import mysql.connector
 import numpy as np
 import pandas as pd
 
-from StocksMinDB.Constants import LogMark,TableCol,ByDay,ByStock
+from StocksMinDB.Constants import LogMark,TableCol,ByDay,ByStock,DB_NOTES
 
 
 class StocksMinDB:
@@ -119,6 +119,12 @@ class StocksMinDB:
         else:
             return [val for ct,val in enumerate(total_lst,1) if ct%self._corenum==seed]
 
+    def _get_trddates(self,conn,dbname='stocks_data_min_by_day'):
+        cursor = conn.cursor()
+        cursor.execute('USE {}'.format(dbname))
+        cursor.execute('SELECT * FROM trddates')
+        return [dt[0] for dt in cursor.fetchall()]
+
     def update_db(self,conn,dbname,data,tablename,colinfo,prmkey=None,if_exist='nothing',chunksize=1000):
         """ 将 单张表格 数据更新至 指定数据库
             data : np.array of size obsnum*colnum
@@ -183,117 +189,132 @@ class StocksMinDB:
                 conn.commit()
                 print('{0}table {1} updated successfully in database {2} with {3} lines and {4} seconds'.format(LogMark.info,tablename,dbname,obsnum,time.time()-st))
 
-    def update_data_by_day(self,seed=None):
-        """ 按日度更新数据，目前为.mat格式 """
+    ####################################################################################################################
+    ################################# 补充 return 列 ###################################
+    ####################################################################################################################
+    def _get_mat(self,theDate=None,theStock=None):
+        # read SINGLE date or stock
+        trdDates = scio.loadmat(r'E:\bqfcts\bqfcts\data\trddates.mat')['trddates'][:,0]
+        stkCodes = scio.loadmat(r'E:\bqfcts\bqfcts\data\stkinfo.mat')['stkinfo'][:,0]
+        if (theDate is None) and (theStock is None):
+            raise BaseException('At least one date or stock should be supported')
+        if (theDate is not None) and (theStock is not None):
+            raise BaseException('Should take only date OR stock')
+        takeDate = theStock is None
+        ##### read the data #######
+        firstDate = np.argwhere(trdDates==DB_NOTES.DB_FIRST_DATE)[0][0]
+        firstCurr = 6000
+        histStkNum = 3433
+        palDate = 0
+        palClose = 4
+        palPctChg = 7
+        if takeDate:
+            datePos = np.argwhere(trdDates==theDate)
+            if not datePos.shape[0]:
+                raise BaseException('date {} is NOT a valid trade date'.format(theDate))
+            else:
+                datePos = datePos[0][0]
+            if datePos<firstCurr:
+                matName = r'data_19901219_20170630.mat'
+                stkcds = stkCodes[:histStkNum]
+            else:
+                matName = r'data_20150701_now.mat'
+                datePos = datePos - firstCurr
+                stkcds = stkCodes[:]
+            matPath = r'E:\bqfcts\bqfcts\data\Pal\{}'.format(matName)
+            pal = h5py.File(matPath)['Pal']
+            data = pd.DataFrame(np.column_stack([np.transpose(pal[[palDate,palClose,palPctChg],datePos,:]),stkcds]),columns=['date','close','pctchg','stkcd'])
+        else:
+            stkPos = np.argwhere(stkCodes==theStock)
+            if not stkPos.shape[0]:
+                raise BaseException('stock code {} is NOT a valid code'.format(theStock))
+            else:
+                stkPos = stkPos[0][0]
+            currPal = h5py.File(r'E:\bqfcts\bqfcts\data\Pal\data_20150701_now.mat')['Pal']
+            if stkPos<histStkNum:
+                histPal = h5py.File(r'E:\bqfcts\bqfcts\data\Pal\data_19901219_20170630.mat')['Pal']
+                data = pd.DataFrame(np.transpose(np.column_stack([histPal[[palDate,palClose,palPctChg],firstDate:firstCurr,stkPos],
+                                                                  currPal[[palDate,palClose,palPctChg],:,stkPos]])),
+                                    columns=['date','close','pctchg'])
+            else:
+                data = pd.DataFrame(np.transpose(currPal[[palDate,palClose,palPctChg],:,stkPos]),columns=['date','close','pctchg'])
+        return data[data['date']>0]
+
+    def _patch_rets_by_day(self,seed=None):
         dbname='stocks_data_min_by_day'
         self._switchDB_(seed=seed,dbname=dbname)
         conn = self._getConn_(seed=seed)
         cursor = conn.cursor()
-        ######## 提取需要更新的日期 ###############
-        datelst = [date.split('.')[0] for date in os.listdir(self._updtpath)]
-        newdates = sorted(set(datelst) - set([tb.split('_')[1] for tb in self._get_db_tables_all(dbname=dbname,seed=seed)]))
-        if not newdates:
-            print('no new table to update for database {0}'.format(dbname))
-            return
-        else:
-            print('{0} tables to update for database {1}'.format(len(newdates),dbname))
-        colnames = ['stkcd','time','open','high','low','close','volume','amount','stkid']
-        colinfo = ByDay.colinfo
-        prmkey = ByDay.prmkey
-        for newdt in newdates:
-            tablename = 'stkmin_'+newdt
-            print(tablename)
-            newdata = pd.DataFrame(np.transpose(h5py.File(os.path.join(self._updtpath,'{0}.mat'.format(newdt)))['sdata']),columns=colnames)
-            newdata['volamtflag'] = 0
-            newdata.loc[newdata['amount']>(newdata['volume']+100)*newdata['high'],'volamtflag'] = 1
-            newdata.loc[newdata['amount']<(newdata['volume']-100)*newdata['low'],'volamtflag'] = 2
-            newdata.loc[(newdata['amount']==0) & (newdata['volume']>0),'volamtflag'] = 3
-            newdata.loc[(newdata['amount']==0) & (newdata['volume']==0),'volamtflag'] = 4
-            self.update_db(conn=conn,data=newdata.values,tablename=tablename,colinfo=colinfo,prmkey=prmkey,dbname=dbname,if_exist='replace')
-            dateupdt = 'INSERT INTO trddates (date) VALUES ({0})'.format(newdt)
-            cursor.execute(dateupdt)
-            conn.commit()
+        trdDates = self._get_trddates(conn=conn,dbname=dbname)
+        preColInfo = {k:ByDay.colinfo[k] for k in ByDay.colinfo.keys() if k!=TableCol.stkid}
+        selfupdt = 20171201
+        trdDates = [dt for dt in trdDates if dt>=selfupdt]
+        for trdt in trdDates:
+            start = time.time()
+            if (trdt in DB_NOTES.DB_MISSING_DATE) or (trdt<DB_NOTES.DB_FIRST_DATE):
+                continue
+            predata = pd.read_sql('SELECT * FROM stkmin_{}'.format(trdt),con=conn)
+            # if trdt>20171205:
+            #     predata.drop(labels=[TableCol.stkid],axis=1,inplace=True)
+            predata[TableCol.ret] = predata.groupby([TableCol.stkcd])[TableCol.close].diff()/predata[TableCol.close]
+            pal = self._get_mat(theDate=int(trdt))
+            stkHeadIdx = predata[TableCol.stkcd].diff()!=0  # 须确保是按照 股票代码、时间 排序的
+            stkHead = predata[stkHeadIdx]
+            palIdx = pal['stkcd'].isin(stkHead[TableCol.stkcd])
+            headIdx = stkHead[TableCol.stkcd].isin(pal['stkcd'])
+            min1Ret = np.zeros([stkHead.shape[0],1])
+            min1Ret[headIdx] = np.reshape((1+pal['pctchg'].values[palIdx])/(pal['close'].values[palIdx]/stkHead[TableCol.close].values[headIdx]) - 1,(-1,1))
+            predata.loc[np.argwhere(stkHeadIdx.values)[:,0],TableCol.ret] = min1Ret
+            predata.loc[np.argwhere(np.isinf(predata[TableCol.ret]).values | np.isnan(predata[TableCol.ret]).values)[:,0],TableCol.ret] = -2
+            # cursor.execute('ALTER TABLE stkmin_{} ADD COLUMN testret FLOAT'.format(trdt))
+            # retstr = ','.join([''.join(['(','{}'.format(ret),')']) for ret in predata[TableCol.ret].values])
+            # cursor.execute('REPLACE INTO stkmin_{0} (testret) VALUES {1}'.format(trdt,retstr))
+            # conn.commit()
+            # colinfo = ByDay.colinfo if trdt>=20171201 else preColInfo
+            colinfo = preColInfo
+            self.update_db(conn=conn,data=predata.values,tablename='stkmin_{}'.format(trdt),colinfo=colinfo,prmkey=ByDay.prmkey,dbname=dbname,if_exist='replace')
+            print('stkmin_{0} updated with {1} seconds'.format(trdt,time.time()-start))
 
-    def update_data_by_stock(self,tempfolder,seed=None):
-        """ 按股票更新（历史）数据，目前为CSV格式"""
-        dbname = 'stocks_data_min_by_stock'
+    def _patch_rets_by_stock(self,seed=None):
+        dbname='stocks_data_min_by_stock'
         self._switchDB_(seed=seed,dbname=dbname)
         conn = self._getConn_(seed=seed)
-        filepath = os.path.join(self._histpath,tempfolder)
-        assert os.path.exists(filepath)
-        filelst = self._get_filelst(filepath=filepath,seed=seed)
-        print(filelst)
-        colnames = ['date','time','open','high','low','close','volume','amount']
-        colinfo = ByStock.colinfo
-        prmkey = ByStock.prmkey
-        updtedlstpath = os.path.join(self._tmpupdt,'updtedlst{0}.txt'.format(seed))
-        if not os.path.exists(updtedlstpath):
-            os.system('cd.>{0}'.format(updtedlstpath))
-        for fl in filelst:
-            flname = fl.split('.')[0]
-            assert(len(flname))==8
-            tablename = 'stkmin_' + flname.lower()
-            with open(updtedlstpath,'r') as tmpupdt:  # 处理中途失败的情况
-                updtedlst = tmpupdt.readlines()
-                updtedlst = [ufl.strip() for ufl in updtedlst]
-            if fl in updtedlst:
+        backupConn = mysql.connector.connect(**self._loginfo)
+        backupCursor = backupConn.cursor()
+        backupCursor.execute('USE backup_by_stock')
+        allTables = self._get_db_tables_all(dbname=dbname)
+        with open('updated_stocks.txt') as fl:
+            donelist = [d.strip() for d in fl.readlines()]
+        for tb in allTables:
+            start = time.time()
+            if int(tb[-6:]) in DB_NOTES.DB_MISSING_STOCK or int(tb[-6:]) in DB_NOTES.MAT_MISSING_STOCK or tb in donelist:
                 continue
-            cond1 = not flname[2:].isnumeric()
-            cond2 = flname[0:2]=='SH' and (flname[2] not in ('6'))
-            cond3 = flname[0:2]=='SZ' and (flname[2] not in ('0','3'))
-            cond4 = flname[0:2]=='SZ' and (flname[2:5]=='399')
-            cond5 = flname[0:2]=='SZ' and (flname[2:4] in ('08','03'))
-            if cond1 or cond2 or cond3 or cond4 or cond5:
-                continue
-            fldata = pd.read_csv(os.path.join(filepath,fl),names=colnames)
-            fldata['stkcd'] = int(flname[2:8])
-            fldata['date'] = fldata['date'].str.replace('([/-]?)','').map(int)
-            fldata['time'] = fldata['time'].str.replace(':','').map(int).map(lambda x:x if x<10000 else int(x/100))
-            for dumi in range(1,len(fldata['time'])): # 重复时间处理
-                if fldata['time'][dumi]==fldata['time'][dumi-1]:
-                    mins = fldata['time'][dumi]%100
-                    hour = (fldata['time'][dumi]-mins)/100
-                    hour += (mins==59)
-                    mins = 0 if mins==59 else mins+1
-                    fldata['time'][dumi] = int(hour*100 + mins)
-            fldata['volamtflag'] = 0
-            fldata.loc[fldata['amount']>(fldata['volume']+100)*fldata['high'],'volamtflag'] = 1
-            fldata.loc[fldata['amount']<(fldata['volume']-100)*fldata['low'],'volamtflag'] = 2
-            fldata.loc[(fldata['amount']==0) & (fldata['volume']>0),'volamtflag'] = 3
-            fldata.loc[(fldata['amount']==0) & (fldata['volume']==0),'volamtflag'] = 4
-            self.update_db(conn=conn,data=fldata.values,tablename=tablename,colinfo=colinfo,prmkey=prmkey,dbname=dbname,if_exist='append')
-            with open(updtedlstpath,'a+') as tmpupdt:
-                tmpupdt.writelines(fl+'\n')
-        os.system('del {0}'.format(updtedlstpath))
+            ## backup table first
+            backupCursor.execute('CREATE TABLE {0} LIKE {1}.{2}'.format(tb,dbname,tb))
+            backupCursor.execute('INSERT {0} SELECT * FROM {1}.{2}'.format(tb,dbname,tb))
+            backupConn.commit()
+            print('{0} backuped in database {1}'.format(tb,'backup_by_stock'))
+            ##
+            predata = pd.read_sql('SELECT * FROM {}'.format(tb),con=conn)
+            predata.drop(labels=[TableCol.stkcd],axis=1,inplace=True)
+            predata[TableCol.ret] = predata.groupby([TableCol.date])[TableCol.close].diff()/predata[TableCol.close]
+            stkHeadIdx = predata[TableCol.date].diff()!=0  # 须确保是按照 日期、时间 排序的
+            stkHead = predata[stkHeadIdx]
+            pal = self._get_mat(theStock=int(tb[-6:]))
+            palIdx = pal['date'].isin(stkHead[TableCol.date])
+            headIdx = stkHead[TableCol.date].isin(pal['date'])
+            min1Ret = np.zeros([stkHead.shape[0],1])
+            min1Ret[headIdx] = np.reshape((1+pal['pctchg'].values[palIdx])/(pal['close'].values[palIdx]/stkHead[TableCol.close].values[headIdx]) - 1,(-1,1))
+            predata.loc[np.argwhere(stkHeadIdx.values)[:,0],TableCol.ret] = min1Ret
+            predata.loc[np.argwhere(np.isinf(predata[TableCol.ret]).values | np.isnan(predata[TableCol.ret]).values)[:,0],TableCol.ret] = -2
+            self.update_db(conn=conn,data=predata.values,tablename=tb,colinfo=ByStock.colinfo,prmkey=ByStock.prmkey,dbname=dbname,if_exist='replace')
+            with open('updated_stocks.txt','a+') as fl:
+                fl.writelines(tb+'\n')
+            print('{0} updated with {1} seconds'.format(tb,time.time()-start))
 
-    def multi_update_data_by_stock(self,tempfolder):
-        """多进程更新 按股票"""
-        assert self._corenum>1 # 只在多进程情况下可调用该函数
-        dbname = 'stocks_data_min_by_stock'
-        self.connectDB(dbname=dbname)
-        print('{0}Updating database {1} with {2} cores from {3}'.format(LogMark.info,dbname,self._corenum,tempfolder))
-        print()
-        pool = mpr.Pool(self._corenum)
-        for seed in range(self._corenum):
-            args = (tempfolder,seed)
-            pool.apply_async(func=self.update_data_by_stock,args=args)
-        pool.close()
-        pool.join()
-
-    def _get_trddates(self,conn):
-        cursor = conn.cursor()
-        cursor.execute('USE stocks_data_min_by_day')
-        cursor.execute('SELECT * FROM trddates')
-        return [dt[0] for dt in cursor.fetchall()]
-
-    # def update_trddates(self,dbname):
-    #     self._db_connect(dbname=dbname)
-    #     dates = scio.loadmat(r'C:\Users\Jiapeng\Desktop\trddates.mat')['trddates'][:,0]
-    #     for dt in dates:
-    #         exeline = 'INSERT INTO trddates (date) VALUES ({0})'.format(dt)
-    #         self.cursor.execute(exeline)
-    #     self.conn.commit()
-
+    ####################################################################################################################
+    ##############################  缺失数据检查   ####################################################
+    ####################################################################################################################
     def _lost_stks(self):
         dbname='stocks_data_min_by_day'
         self.connectDB(dbname=dbname)
@@ -381,6 +402,115 @@ class StocksMinDB:
                 writer.writerow(newstk)
         print(time.time()-start)
 
+    ####################################################################################################################
+    ##############################  数据库更新   ####################################################
+    ####################################################################################################################
+    def update_data_by_day(self,seed=None):
+        """ 按日度更新数据，目前为.mat格式 """
+        dbname='stocks_data_min_by_day'
+        self._switchDB_(seed=seed,dbname=dbname)
+        conn = self._getConn_(seed=seed)
+        cursor = conn.cursor()
+        ######## 提取需要更新的日期 ###############
+        datelst = [date.split('.')[0] for date in os.listdir(self._updtpath)]
+        newdates = sorted(set(datelst) - set([tb.split('_')[1] for tb in self._get_db_tables_all(dbname=dbname,seed=seed)]))
+        if not newdates:
+            print('no new table to update for database {0}'.format(dbname))
+            return
+        else:
+            print('{0} tables to update for database {1}'.format(len(newdates),dbname))
+        colnames = ['stkcd','time','open','high','low','close','volume','amount','stkid']
+        colinfo = ByDay.colinfo
+        prmkey = ByDay.prmkey
+        for newdt in newdates:
+            tablename = 'stkmin_'+newdt
+            print(tablename)
+            newdata = pd.DataFrame(np.transpose(h5py.File(os.path.join(self._updtpath,'{0}.mat'.format(newdt)))['sdata']),columns=colnames)
+            newdata['volamtflag'] = 0
+            newdata.loc[newdata['amount']>(newdata['volume']+100)*newdata['high'],'volamtflag'] = 1
+            newdata.loc[newdata['amount']<(newdata['volume']-100)*newdata['low'],'volamtflag'] = 2
+            newdata.loc[(newdata['amount']==0) & (newdata['volume']>0),'volamtflag'] = 3
+            newdata.loc[(newdata['amount']==0) & (newdata['volume']==0),'volamtflag'] = 4
+            newdata.drop(['stkid'],axis=1,inplace=True)
+            newdata['return'] = newdata.groupby(['stkcd'])['close'].diff()/newdata['close']
+            pal = self._get_mat(theDate=int(newdt))
+            stkHeadIdx = newdata['stkcd'].diff()!=0
+            stkHead = newdata[stkHeadIdx]
+            palIdx = pal['stkcd'].isin(stkHead['stkcd'])
+            min1Ret = (1+pal['pctchg'].values[palIdx])/(pal['close'].values[palIdx]/stkHead['close'].values) - 1
+            newdata.loc[np.argwhere(stkHeadIdx.values)[:,0],'return'] = min1Ret
+            self.update_db(conn=conn,data=newdata.values,tablename=tablename,colinfo=colinfo,prmkey=prmkey,dbname=dbname,if_exist='replace')
+            retToInsert = '({i},)'
+            dateupdt = 'INSERT INTO trddates (date) VALUES ({0})'.format(newdt)
+            cursor.execute(dateupdt)
+            conn.commit()
+
+    def update_data_by_stock(self,tempfolder,seed=None):
+        """ 按股票更新（历史）数据，目前为CSV格式"""
+        dbname = 'stocks_data_min_by_stock'
+        self._switchDB_(seed=seed,dbname=dbname)
+        conn = self._getConn_(seed=seed)
+        filepath = os.path.join(self._histpath,tempfolder)
+        assert os.path.exists(filepath)
+        filelst = self._get_filelst(filepath=filepath,seed=seed)
+        print(filelst)
+        colnames = ['date','time','open','high','low','close','volume','amount']
+        colinfo = ByStock.colinfo
+        prmkey = ByStock.prmkey
+        updtedlstpath = os.path.join(self._tmpupdt,'updtedlst{0}.txt'.format(seed))
+        if not os.path.exists(updtedlstpath):
+            os.system('cd.>{0}'.format(updtedlstpath))
+        for fl in filelst:
+            flname = fl.split('.')[0]
+            assert(len(flname))==8
+            tablename = 'stkmin_' + flname.lower()
+            with open(updtedlstpath,'r') as tmpupdt:  # 处理中途失败的情况
+                updtedlst = tmpupdt.readlines()
+                updtedlst = [ufl.strip() for ufl in updtedlst]
+            if fl in updtedlst:
+                continue
+            cond1 = not flname[2:].isnumeric()
+            cond2 = flname[0:2]=='SH' and (flname[2] not in ('6'))
+            cond3 = flname[0:2]=='SZ' and (flname[2] not in ('0','3'))
+            cond4 = flname[0:2]=='SZ' and (flname[2:5]=='399')
+            cond5 = flname[0:2]=='SZ' and (flname[2:4] in ('08','03'))
+            if cond1 or cond2 or cond3 or cond4 or cond5:
+                continue
+            fldata = pd.read_csv(os.path.join(filepath,fl),names=colnames)
+            fldata['stkcd'] = int(flname[2:8])
+            fldata['date'] = fldata['date'].str.replace('([/-]?)','').map(int)
+            fldata['time'] = fldata['time'].str.replace(':','').map(int).map(lambda x:x if x<10000 else int(x/100))
+            for dumi in range(1,len(fldata['time'])): # 重复时间处理
+                if fldata['time'][dumi]==fldata['time'][dumi-1]:
+                    mins = fldata['time'][dumi]%100
+                    hour = (fldata['time'][dumi]-mins)/100
+                    hour += (mins==59)
+                    mins = 0 if mins==59 else mins+1
+                    fldata['time'][dumi] = int(hour*100 + mins)
+            fldata['volamtflag'] = 0
+            fldata.loc[fldata['amount']>(fldata['volume']+100)*fldata['high'],'volamtflag'] = 1
+            fldata.loc[fldata['amount']<(fldata['volume']-100)*fldata['low'],'volamtflag'] = 2
+            fldata.loc[(fldata['amount']==0) & (fldata['volume']>0),'volamtflag'] = 3
+            fldata.loc[(fldata['amount']==0) & (fldata['volume']==0),'volamtflag'] = 4
+            self.update_db(conn=conn,data=fldata.values,tablename=tablename,colinfo=colinfo,prmkey=prmkey,dbname=dbname,if_exist='append')
+            with open(updtedlstpath,'a+') as tmpupdt:
+                tmpupdt.writelines(fl+'\n')
+        os.system('del {0}'.format(updtedlstpath))
+
+    def multi_update_data_by_stock(self,tempfolder):
+        """多进程更新 按股票"""
+        assert self._corenum>1 # 只在多进程情况下可调用该函数
+        dbname = 'stocks_data_min_by_stock'
+        self.connectDB(dbname=dbname)
+        print('{0}Updating database {1} with {2} cores from {3}'.format(LogMark.info,dbname,self._corenum,tempfolder))
+        print()
+        pool = mpr.Pool(self._corenum)
+        for seed in range(self._corenum):
+            args = (tempfolder,seed)
+            pool.apply_async(func=self.update_data_by_stock,args=args)
+        pool.close()
+        pool.join()
+
     def _oneday_stk2day_(self,day,stklst,seed,writeconn,lock):
         self._switchDB_(seed=seed,dbname='stocks_data_min_by_stock')
         conn = self._getConn_(seed=seed)
@@ -443,7 +573,6 @@ class StocksMinDB:
                 p.join()
             print(time.time()-start)
 
-
     def _splited_day2stk(self,data,stklst,seed):
         self._switchDB_(seed=seed,dbname='stocks_data_min_by_stock')
         conn = self._getConn_(seed=seed)
@@ -458,9 +587,10 @@ class StocksMinDB:
                 else:
                     stkcd = 'sz{0}'.format(stk)
             tablename = 'stkmin_'+stkcd
+            byStockCols = [col for col in ByStock.colinfo]
             self.update_db(conn=conn,
                            dbname='stocks_data_min_by_stock',
-                           data=data[data['STKCD']==stk].values,
+                           data=data[data['STKCD']==stk].loc[:,byStockCols].values,
                            tablename=tablename,
                            colinfo=ByStock.colinfo,
                            prmkey=ByStock.prmkey,
@@ -482,7 +612,6 @@ class StocksMinDB:
         bydaycursor.execute('USE stocks_data_min_by_day')
         bydaycursor.execute('SELECT date FROM trddates')
         bydaydates = set([dt[0] for dt in bydaycursor.fetchall()])
-        columns = [col for col in ByStock.colinfo]
         dates = sorted(list(bydaydates-bystkdates))
         trddates = self._get_trddates(conn=bydayconn)
         if not dates:
@@ -498,7 +627,6 @@ class StocksMinDB:
                 allstklst = [stk[0] for stk in bydaycursor.fetchall()]
                 data = pd.read_sql('SELECT * FROM stkmin_{0}'.format(dts),con=bydayconn)
                 data['DATE'] = dts
-                data = data.loc[:,columns]
                 pros = []
                 for seed in range(self._corenum):
                     stklst = [stk for ct,stk in enumerate(allstklst,1) if ct%self._corenum==seed]
@@ -512,3 +640,35 @@ class StocksMinDB:
             bystkconn.commit()
             print('{0} updated'.format(dts))
 
+
+    ########### temp 生成 日度 mat 数据文件 ##############
+    def gen_daily_mat(self):
+        remotePath = r'\\192.168.1.88\mat_data\by_day'
+
+        dbname='stocks_data_min_by_day'
+        self.connectDB(dbname=dbname)
+        conn = self._getConn_()
+        cursor = conn.cursor()
+
+        cursor.execute('SHOW TABLES')
+        savedDbTables = set([tb[0] for tb in cursor.fetchall() if tb[0]!='trddates'])
+        savedMatsTables = set([mat.split('.')[0] for mat in os.listdir(remotePath)])
+        newTables = savedDbTables - savedMatsTables
+
+        print('{} new tables to update'.format(len(newTables)))
+        for tb in sorted(newTables):
+            matPath = os.path.join(remotePath,'{}.mat'.format(tb))
+            cursor.execute('SELECT * FROM {}'.format(tb))
+            scio.savemat(file_name=matPath,mdict={tb:np.array(cursor.fetchall())},do_compression=True)
+            print('[+]Table {} updated'.format(tb))
+
+
+
+if __name__=='__main__':
+    obj = StocksMinDB(configpath=r'E:\stocks_data_min\StocksMinDB\configs')
+    # obj.gen_daily_mat()
+    # obj.update_data_by_day()
+    # obj.bystk2byday(dates=[19991008])
+    # obj._patch_rets_by_day()
+    # obj._get_mat(theStock=1)
+    obj._patch_rets_by_stock()

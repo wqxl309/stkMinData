@@ -109,6 +109,12 @@ class minDataExtractor:
             newHist = True
             newCurr = True
         if newHist:     # 创建历史 mat
+            # 创建配置文件
+            configPath = os.path.join(dataPath,'mat_data.ini')
+            with open(configPath,'w') as cf:
+                cf.writelines('[{}]\n'.format(dataName))
+                cf.writelines('slice = 2\n')
+                cf.writelines('dimData = 1\n')
             histData = self._extract_data(cursor=cursor,byAxis='stkcd',dateList=self._dates[:dataConstants.HIST_DAYNUM],stkList=self._stkcds[:dataConstants.HIST_STKNUM],expr=expr,condition=condition)
             scio.savemat(file_name=histMatPath,mdict={dataName:histData})
             print('hist mat created')
@@ -135,6 +141,6 @@ class minDataExtractor:
 
 if __name__=='__main__':
     obj = minDataExtractor()
-    obj.update_single_day(expr='STD(volume)',dataName='std_morning',condition='AND (time<1200)')
-    obj.update_single_day(expr='STD(volume)',dataName='std_afternoon',condition='AND (time>1200)')
+    # obj.update_single_day(expr='SUM(amount)',dataName='amount_morning',condition='AND (time<1200)')
+    # obj.update_single_day(expr='SUM(amount)',dataName='amount_afternoon',condition='AND (time>1200)')
 

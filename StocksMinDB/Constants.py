@@ -21,9 +21,11 @@ class TableCol:
     amount = 'AMOUNT'
     stkid = 'STKID'
     volamtflag = 'VOLAMTFLAG'
+    ret = 'CLSRET'
 
 class ByStock:
     colinfo = {
+        # TableCol.stkcd:'INT UNSIGNED NOT NULL',
         TableCol.date:'INT UNSIGNED NOT NULL',
         TableCol.time:'INT UNSIGNED NOT NULL',
         TableCol.open:'FLOAT',
@@ -32,8 +34,8 @@ class ByStock:
         TableCol.close:'FLOAT',
         TableCol.volume:'DOUBLE',
         TableCol.amount:'DOUBLE',
-        TableCol.stkcd:'INT UNSIGNED NOT NULL',
-        TableCol.volamtflag:'INT(1) UNSIGNED NOT NULL'
+        TableCol.volamtflag:'INT(1) UNSIGNED NOT NULL',
+        TableCol.ret:'FLOAT'
     }
     prmkey = [TableCol.date,TableCol.time]
 
@@ -47,7 +49,14 @@ class ByDay:
         TableCol.close:'FLOAT',
         TableCol.volume:'DOUBLE',
         TableCol.amount:'DOUBLE',
-        TableCol.stkid:'INT UNSIGNED NOT NULL',
-        TableCol.volamtflag:'INT(1) UNSIGNED NOT NULL'
+        # TableCol.stkid:'INT UNSIGNED NOT NULL',
+        TableCol.volamtflag:'INT(1) UNSIGNED NOT NULL',
+        TableCol.ret:'FLOAT'
     }
     prmkey = [TableCol.stkcd,TableCol.time]
+
+class DB_NOTES:
+    DB_FIRST_DATE = 19990726
+    DB_MISSING_DATE = [19990825, 20010704, 20011022, 20020225, 20020227, 20061017, 20070330]
+    DB_MISSING_STOCK = [508]    # .mat 中有 分钟数据库中没有的股票
+    MAT_MISSING_STOCK = [600849]   # .mat 中没有 分钟数据库中有的股票
