@@ -211,7 +211,7 @@ class StocksMinDB:
         if takeDate:
             datePos = np.argwhere(trdDates==theDate)
             if not datePos.shape[0]:
-                raise BaseException('date {} is NOT a valid trade date'.format(theDate))
+                raise BaseException('date {} is NOT a valid trade date in trdDates.mat'.format(theDate))
             else:
                 datePos = datePos[0][0]
             if datePos<firstCurr:

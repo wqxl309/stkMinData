@@ -16,9 +16,9 @@ from StocksMinDB.CheckDatabases import databaseChecker
 if __name__=='__main__':
     todaystr = dt.datetime.today().strftime('%Y%m%d')
 
-    remotedir = r'\\Zhouhu\a股历史数据\A股分钟数据每日更新\stockdata1F'
+    remotedir = r'\\192.168.1.168\a股历史数据\A股分钟数据每日更新\stockdata1F'
     localdir = r'E:\stocks_data\min_data\stockdata1F'
-    newdates = set(os.listdir(remotedir)) - set(os.listdir(localdir))
+    newdates = sorted(list(set(os.listdir(remotedir)) - set(os.listdir(localdir))))
     if not newdates:
         print('No new data to update on date {}'.format(todaystr))
     else:

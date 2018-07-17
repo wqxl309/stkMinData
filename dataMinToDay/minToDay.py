@@ -2,7 +2,6 @@ import os
 import sys
 import time
 
-import datetime as dt
 import configparser as cp
 import numpy as np
 import scipy.io as scio
@@ -58,7 +57,17 @@ class minDataExtractor:
         result = cursor.fetchall()
         return np.array(result) if result else None
 
-    def _extract_data(self,cursor,dateList,stkList,expr,condition,byAxis=None):
+    def _extract_data(self,cursor,dateList,stkList,exprs,conditions,exprPages=None,byAxis=None):
+        """
+        :param cursor:
+        :param dateList:
+        :param stkList:
+        :param exprs:
+        :param exprPages:  针对expr中包含多列的情况，ex 'sum(a) as a, sum(b)', 制定需要返回的列 exprPage = [False,True]
+        :param conditions:
+        :param byAxis:
+        :return: output # page 0 is the flag page, 通过二进制数来标记，def : sum( 2** [expr1valid, expr2valid...] )  exprivalid = 1 if valid else 0
+        """
         start = time.time()
         dayNum = dateList.shape[0]
         stkNum = stkList.shape[0]
@@ -66,31 +75,51 @@ class minDataExtractor:
             byAxis = 'stkcd' if stkNum<dayNum else 'day'
         dbName = 'stocks_data_min_by_{}'.format('stock' if byAxis=='stkcd' else 'day')
         cursor.execute('USE {}'.format(dbName))
-        output = np.zeros([stkNum,dayNum,2])
+        exprPages = [[True for dumi in expr.split(' , ')] for expr in exprs] if exprPages is None else exprPages
+        # set up output
+        assert(len(exprs)==len(conditions))
+        pageNum = np.sum([sum(epg) for epg in exprPages])
+        output = np.zeros([stkNum,dayNum,pageNum+1])
         if byAxis=='stkcd':
             for dumi,stk in enumerate(stkList):
                 if stk in dataConstants.DB_MISSING_STOCK:
                     continue
-                oneData = self._select_by_stk(cursor=cursor,stkcd=stk,dateList=dateList,expr=expr,condition=condition)
-                if oneData is not None:
-                    validIdx = np.isin(dateList,oneData[:,0],assume_unique=True)
-                    output[dumi,:,0] = validIdx
-                    output[dumi,validIdx,1] = oneData[:,1]
-                    print('{} processed'.format(stk))
+                s1 = time.time()
+                exprTotPages = 0
+                for exprCnt,expr in enumerate(exprs):
+                    condition = conditions[exprCnt]
+                    exprPage = exprPages[exprCnt]
+                    oneData = self._select_by_stk(cursor=cursor,stkcd=stk,dateList=dateList,expr=expr,condition=condition)
+                    if oneData is not None:
+                        validIdx = np.isin(dateList,oneData[:,0],assume_unique=True)    # 每日数据的第一列 输出日期
+                        output[dumi,:,0] += validIdx*(2**exprCnt)                       # 更新二进制 flag
+                        pageCnt = np.cumsum(exprPage)                         # 当前expr中，需要存储的page 的位置
+                        for page in pageCnt:
+                            output[dumi,validIdx,exprTotPages + page] = oneData[:,page]
+                        exprTotPages += len(exprPages[exprCnt])
+                print('stock {0} processed with {1} seconds'.format(stk,time.time()-s1))
         else:
             for dumi,day in enumerate(dateList):
                 if (day < dataConstants.DB_FIRST_DATE) or (day in dataConstants.DB_MISSING_DATE):
                     continue
-                oneData = self._select_by_day(cursor=cursor,date=day,stkList=stkList,expr=expr,condition=condition)
-                if oneData is not None:
-                    validIdx = np.isin(stkList,oneData[:,0],assume_unique=True)
-                    output[:,dumi,0] = validIdx
-                    output[validIdx,dumi,1] = oneData[:,1]
-                    print('{} processed'.format(day))
+                s1 = time.time()
+                exprTotPages = 0
+                for exprCnt, expr in enumerate(exprs):
+                    condition = conditions[exprCnt]
+                    exprPage = exprPages[exprCnt]
+                    oneData = self._select_by_day(cursor=cursor,date=day,stkList=stkList,expr=expr,condition=condition)
+                    if oneData is not None:
+                        validIdx = np.isin(stkList,oneData[:,0],assume_unique=True)     # 每日数据的第一列 输出股票代码
+                        output[:,dumi,0] += validIdx*(2**exprCnt)
+                        pageCnt = np.cumsum(exprPage)  # 当前expr中，需要存储的page 的位置
+                        for page in pageCnt:
+                            output[validIdx,dumi,exprTotPages + page] = oneData[:,page]
+                        exprTotPages += len(exprPages[exprCnt])
+                print('date {0} processed with {1} seconds'.format(day,time.time()-s1))
         print('all processed with {} seconds'.format(time.time() - start))
         return output
 
-    def update_single_day(self,expr,condition,dataName):
+    def update_single_day(self,dataName,exprs,conditions,exprPages=None):
         """
             提取 单独一个叫日内可生成的数据
             数据应存储为 形状同Pal
@@ -115,7 +144,7 @@ class minDataExtractor:
                 cf.writelines('[{}]\n'.format(dataName))
                 cf.writelines('slice = 2\n')
                 cf.writelines('dimData = 1\n')
-            histData = self._extract_data(cursor=cursor,byAxis='stkcd',dateList=self._dates[:dataConstants.HIST_DAYNUM],stkList=self._stkcds[:dataConstants.HIST_STKNUM],expr=expr,condition=condition)
+            histData = self._extract_data(cursor=cursor,byAxis='stkcd',dateList=self._dates[:dataConstants.HIST_DAYNUM],stkList=self._stkcds[:dataConstants.HIST_STKNUM],exprs=exprs,conditions=conditions,exprPages=exprPages)
             scio.savemat(file_name=histMatPath,mdict={dataName:histData})
             print('hist mat created')
         if newCurr:     # 创建当前 mat
@@ -129,18 +158,13 @@ class minDataExtractor:
         currDayNum = currDates.shape[0]
         currStkNum = currStkcds.shape[0]
         currMatSaved = scio.loadmat(currMatPath)[dataName]
-        (savedStkNum,savedDayNum,temp) = currMatSaved.shape
+        (savedStkNum,savedDayNum,pageNum) = currMatSaved.shape
         if (currDayNum==savedDayNum) and (currStkNum==savedStkNum):
             print('no data to update')
             return
-        patch = np.zeros((currStkNum-savedStkNum,savedDayNum,2))
-        currUpdate = self._extract_data(cursor=cursor,dateList=currDates[savedDayNum:],stkList=currStkcds,expr=expr,condition=condition)
+        patch = np.zeros((currStkNum-savedStkNum,savedDayNum,pageNum))
+        currUpdate = self._extract_data(cursor=cursor,dateList=currDates[savedDayNum:],stkList=currStkcds,exprs=exprs,conditions=conditions,exprPages=exprPages)
         currMat = np.column_stack([np.row_stack([currMatSaved,patch]),currUpdate])
         scio.savemat(file_name=currMatPath,mdict={dataName:currMat})
-        print('curr mat updated')
-
-if __name__=='__main__':
-    obj = minDataExtractor()
-    # obj.update_single_day(expr='SUM(amount)',dataName='amount_morning',condition='AND (time<1200)')
-    # obj.update_single_day(expr='SUM(amount)',dataName='amount_afternoon',condition='AND (time>1200)')
+        print('curr mat updated successfully, with {0} stocks and {1} days updated'.format(currStkNum-savedStkNum,currDayNum-savedDayNum))
 
