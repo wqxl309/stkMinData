@@ -165,7 +165,7 @@ class databaseChecker:
 
 if __name__=='__main__':
     checker = databaseChecker()
-    checker.check_update(checkDate='20180125')
+    checker.check_update(checkDate='20171201')
 
     # checker.fix_missing(checkDate='20180125')
 

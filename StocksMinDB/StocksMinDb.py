@@ -240,49 +240,47 @@ class StocksMinDB:
                 data = pd.DataFrame(np.transpose(currPal[[palDate,palClose,palPctChg],:,stkPos]),columns=['date','close','pctchg'])
         return data[data['date']>0]
 
-    def _patch_rets_by_day(self,seed=None):
+    def _patch_rets_by_day(self,seed=None,trdDates=None):
         dbname='stocks_data_min_by_day'
         self._switchDB_(seed=seed,dbname=dbname)
         conn = self._getConn_(seed=seed)
         cursor = conn.cursor()
-        trdDates = self._get_trddates(conn=conn,dbname=dbname)
+        trdDates = self._get_trddates(conn=conn,dbname=dbname) if trdDates is None else trdDates
         preColInfo = {k:ByDay.colinfo[k] for k in ByDay.colinfo.keys() if k!=TableCol.stkid}
-        selfupdt = 20171201
-        trdDates = [dt for dt in trdDates if dt>=selfupdt]
+        # selfupdt = 20171201
+        # trdDates = [dt for dt in trdDates if dt>=selfupdt]
+        with open('updated_dates.txt') as fl:
+            donelist = [d.strip() for d in fl.readlines()]
         for trdt in trdDates:
             start = time.time()
-            if (trdt in DB_NOTES.DB_MISSING_DATE) or (trdt<DB_NOTES.DB_FIRST_DATE):
+            if (trdt in DB_NOTES.DB_MISSING_DATE) or (trdt<DB_NOTES.DB_FIRST_DATE) or (trdt in donelist):
                 continue
             predata = pd.read_sql('SELECT * FROM stkmin_{}'.format(trdt),con=conn)
-            # if trdt>20171205:
-            #     predata.drop(labels=[TableCol.stkid],axis=1,inplace=True)
-            predata[TableCol.ret] = predata.groupby([TableCol.stkcd])[TableCol.close].diff()/predata[TableCol.close]
-            pal = self._get_mat(theDate=int(trdt))
+            predata[TableCol.ret] = predata.groupby([TableCol.stkcd])[TableCol.close].diff()/predata[TableCol.close].shift()
+            pal = self._get_mat(theDate=int(trdt)).set_index('stkcd')
             stkHeadIdx = predata[TableCol.stkcd].diff()!=0  # 须确保是按照 股票代码、时间 排序的
-            stkHead = predata[stkHeadIdx]
-            palIdx = pal['stkcd'].isin(stkHead[TableCol.stkcd])
-            headIdx = stkHead[TableCol.stkcd].isin(pal['stkcd'])
-            min1Ret = np.zeros([stkHead.shape[0],1])
-            min1Ret[headIdx] = np.reshape((1+pal['pctchg'].values[palIdx])/(pal['close'].values[palIdx]/stkHead[TableCol.close].values[headIdx]) - 1,(-1,1))
-            predata.loc[np.argwhere(stkHeadIdx.values)[:,0],TableCol.ret] = min1Ret
-            predata.loc[np.argwhere(np.isinf(predata[TableCol.ret]).values | np.isnan(predata[TableCol.ret]).values)[:,0],TableCol.ret] = -2
-            # cursor.execute('ALTER TABLE stkmin_{} ADD COLUMN testret FLOAT'.format(trdt))
-            # retstr = ','.join([''.join(['(','{}'.format(ret),')']) for ret in predata[TableCol.ret].values])
-            # cursor.execute('REPLACE INTO stkmin_{0} (testret) VALUES {1}'.format(trdt,retstr))
-            # conn.commit()
-            # colinfo = ByDay.colinfo if trdt>=20171201 else preColInfo
+            stkHead = predata[stkHeadIdx].set_index(TableCol.stkcd)
+            coIndex = list(set(pal.index) & set(stkHead.index))
+            # 计算第一分钟收益
+            min1Ret = (1+pal.loc[coIndex,'pctchg'])/(pal.loc[coIndex,'close']/stkHead.loc[coIndex,TableCol.close]) - 1
+            stkHead.loc[coIndex,TableCol.ret] = min1Ret.loc[coIndex]
+            # 补回第一分钟收益
+            predata.loc[np.argwhere(stkHeadIdx.values)[:,0],TableCol.ret] = stkHead[TableCol.ret].values
+            predata.loc[np.argwhere(np.isinf(predata[TableCol.ret]).values | np.isnan(predata[TableCol.ret]).values)[:,0],TableCol.ret] = 0
             colinfo = preColInfo
             self.update_db(conn=conn,data=predata.values,tablename='stkmin_{}'.format(trdt),colinfo=colinfo,prmkey=ByDay.prmkey,dbname=dbname,if_exist='replace')
+            with open('updated_dates.txt','a+') as fl:
+                fl.writelines('{}\n'.format(trdt))
             print('stkmin_{0} updated with {1} seconds'.format(trdt,time.time()-start))
 
-    def _patch_rets_by_stock(self,seed=None):
+    def _patch_rets_by_stock(self,seed=None,allTables=None):
         dbname='stocks_data_min_by_stock'
         self._switchDB_(seed=seed,dbname=dbname)
         conn = self._getConn_(seed=seed)
         backupConn = mysql.connector.connect(**self._loginfo)
         backupCursor = backupConn.cursor()
         backupCursor.execute('USE backup_by_stock')
-        allTables = self._get_db_tables_all(dbname=dbname)
+        allTables = self._get_db_tables_all(dbname=dbname) if allTables is None else allTables
         with open('updated_stocks.txt') as fl:
             donelist = [d.strip() for d in fl.readlines()]
         for tb in allTables:
@@ -290,23 +288,23 @@ class StocksMinDB:
             if int(tb[-6:]) in DB_NOTES.DB_MISSING_STOCK or int(tb[-6:]) in DB_NOTES.MAT_MISSING_STOCK or tb in donelist:
                 continue
             ## backup table first
-            backupCursor.execute('CREATE TABLE {0} LIKE {1}.{2}'.format(tb,dbname,tb))
-            backupCursor.execute('INSERT {0} SELECT * FROM {1}.{2}'.format(tb,dbname,tb))
-            backupConn.commit()
-            print('{0} backuped in database {1}'.format(tb,'backup_by_stock'))
-            ##
+            # backupCursor.execute('CREATE TABLE {0} LIKE {1}.{2}'.format(tb,dbname,tb))
+            # backupCursor.execute('INSERT {0} SELECT * FROM {1}.{2}'.format(tb,dbname,tb))
+            # backupConn.commit()
+            # print('{0} backuped in database {1}'.format(tb,'backup_by_stock'))
+            # ##
             predata = pd.read_sql('SELECT * FROM {}'.format(tb),con=conn)
-            predata.drop(labels=[TableCol.stkcd],axis=1,inplace=True)
-            predata[TableCol.ret] = predata.groupby([TableCol.date])[TableCol.close].diff()/predata[TableCol.close]
+            predata[TableCol.ret] = predata.groupby([TableCol.date])[TableCol.close].diff()/predata[TableCol.close].shift()
             stkHeadIdx = predata[TableCol.date].diff()!=0  # 须确保是按照 日期、时间 排序的
-            stkHead = predata[stkHeadIdx]
-            pal = self._get_mat(theStock=int(tb[-6:]))
-            palIdx = pal['date'].isin(stkHead[TableCol.date])
-            headIdx = stkHead[TableCol.date].isin(pal['date'])
-            min1Ret = np.zeros([stkHead.shape[0],1])
-            min1Ret[headIdx] = np.reshape((1+pal['pctchg'].values[palIdx])/(pal['close'].values[palIdx]/stkHead[TableCol.close].values[headIdx]) - 1,(-1,1))
-            predata.loc[np.argwhere(stkHeadIdx.values)[:,0],TableCol.ret] = min1Ret
-            predata.loc[np.argwhere(np.isinf(predata[TableCol.ret]).values | np.isnan(predata[TableCol.ret]).values)[:,0],TableCol.ret] = -2
+            stkHead = predata[stkHeadIdx].set_index(TableCol.date)
+            pal = self._get_mat(theStock=int(tb[-6:])).set_index('date')
+            coIndex = list(set(pal.index) & set(stkHead.index))
+            #   计算第一分钟
+            min1Ret = (1+pal.loc[coIndex,'pctchg'])/(pal.loc[coIndex,'close']/stkHead.loc[coIndex,TableCol.close]) - 1
+            stkHead.loc[coIndex, TableCol.ret] = min1Ret.loc[coIndex]
+            #   补回第一分钟
+            predata.loc[np.argwhere(stkHeadIdx.values)[:, 0], TableCol.ret] = stkHead[TableCol.ret].values
+            predata.loc[np.argwhere(np.isinf(predata[TableCol.ret]).values | np.isnan(predata[TableCol.ret]).values)[:,0],TableCol.ret] = 0
             self.update_db(conn=conn,data=predata.values,tablename=tb,colinfo=ByStock.colinfo,prmkey=ByStock.prmkey,dbname=dbname,if_exist='replace')
             with open('updated_stocks.txt','a+') as fl:
                 fl.writelines(tb+'\n')
@@ -432,13 +430,17 @@ class StocksMinDB:
             newdata.loc[(newdata['amount']==0) & (newdata['volume']>0),'volamtflag'] = 3
             newdata.loc[(newdata['amount']==0) & (newdata['volume']==0),'volamtflag'] = 4
             newdata.drop(['stkid'],axis=1,inplace=True)
-            newdata['return'] = newdata.groupby(['stkcd'])['close'].diff()/newdata['close']
-            pal = self._get_mat(theDate=int(newdt))
+            newdata['return'] = newdata.groupby(['stkcd'])['close'].diff()/newdata['close'].shift()
+            pal = self._get_mat(theDate=int(newdt)).set_index('stkcd')
             stkHeadIdx = newdata['stkcd'].diff()!=0
-            stkHead = newdata[stkHeadIdx]
-            palIdx = pal['stkcd'].isin(stkHead['stkcd'])
-            min1Ret = (1+pal['pctchg'].values[palIdx])/(pal['close'].values[palIdx]/stkHead['close'].values) - 1
-            newdata.loc[np.argwhere(stkHeadIdx.values)[:,0],'return'] = min1Ret
+            stkHead = newdata[stkHeadIdx].set_index('stkcd')
+            coIndex = list(set(pal.index) & set(stkHead.index))
+            #   计算第一分钟
+            min1Ret = (1 + pal.loc[coIndex, 'pctchg']) / (pal.loc[coIndex, 'close'] / stkHead.loc[coIndex, 'close']) - 1
+            stkHead.loc[coIndex, 'return'] = min1Ret.loc[coIndex]
+            #   补回第一分钟
+            newdata.loc[np.argwhere(stkHeadIdx.values)[:, 0], 'return'] = stkHead['return'].values
+            newdata.loc[np.argwhere(np.isinf(newdata['return']).values | np.isnan(newdata['return']).values)[:,0], 'return'] = 0
             self.update_db(conn=conn,data=newdata.values,tablename=tablename,colinfo=colinfo,prmkey=prmkey,dbname=dbname,if_exist='replace')
             retToInsert = '({i},)'
             dateupdt = 'INSERT INTO trddates (date) VALUES ({0})'.format(newdt)
@@ -669,6 +671,7 @@ if __name__=='__main__':
     # obj.gen_daily_mat()
     # obj.update_data_by_day()
     # obj.bystk2byday(dates=[19991008])
-    # obj._patch_rets_by_day()
+    obj._patch_rets_by_day(trdDates=[20080305,20080306])
     # obj._get_mat(theStock=1)
-    obj._patch_rets_by_stock()
+    # obj._get_mat(theDate=20171201)
+    # obj._patch_rets_by_stock(allTables=['stkmin_sh603706'])
