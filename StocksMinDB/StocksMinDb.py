@@ -671,7 +671,10 @@ if __name__=='__main__':
     # obj.gen_daily_mat()
     # obj.update_data_by_day()
     # obj.bystk2byday(dates=[19991008])
-    obj._patch_rets_by_day(trdDates=[20080305,20080306])
+    # obj._patch_rets_by_day(trdDates=[20080305,20080306])
     # obj._get_mat(theStock=1)
     # obj._get_mat(theDate=20171201)
     # obj._patch_rets_by_stock(allTables=['stkmin_sh603706'])
+
+    # obj._patch_rets_by_day()
+    obj._patch_rets_by_stock()
