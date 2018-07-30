@@ -142,8 +142,8 @@ class minDataExtractor:
             configPath = os.path.join(dataPath,'mat_data.ini')
             with open(configPath,'w') as cf:
                 cf.writelines('[{}]\n'.format(dataName))
-                cf.writelines('slice = 2\n')
-                cf.writelines('dimData = 1\n')
+                cf.writelines('slice = 1\n')
+                cf.writelines('dimData = 2\n')
             histData = self._extract_data(cursor=cursor,byAxis='stkcd',dateList=self._dates[:dataConstants.HIST_DAYNUM],stkList=self._stkcds[:dataConstants.HIST_STKNUM],exprs=exprs,conditions=conditions,exprPages=exprPages)
             scio.savemat(file_name=histMatPath,mdict={dataName:histData})
             print('hist mat created')
